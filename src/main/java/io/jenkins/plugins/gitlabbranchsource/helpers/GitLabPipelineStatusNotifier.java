@@ -46,6 +46,7 @@ import org.gitlab4j.api.GitLabApi;
 import org.gitlab4j.api.GitLabApiException;
 import org.gitlab4j.api.models.CommitStatus;
 import org.gitlab4j.api.models.MergeRequest;
+import org.gitlab4j.api.models.Pipeline;
 import org.jenkinsci.plugins.displayurlapi.DisplayURLProvider;
 
 /**
@@ -279,6 +280,19 @@ public class GitLabPipelineStatusNotifier {
     }
 
     /**
+     * Create a pipeline in GitLab for merge request
+     */
+    private static void createMergeRequestPipeline(GitLabApi gitLabApi, String projectPath, Long mrId, String ref) {
+        try {
+            LOGGER.log(Level.INFO, "Creating MR pipeline for MR ID: {0}, ref: {1}", new Object[]{mrId, ref});
+            Pipeline pipeline = gitLabApi.getPipelineApi().createPipeline(projectPath, ref);
+            LOGGER.log(Level.INFO, "Created pipeline ID: {0} for MR: {1}", new Object[]{pipeline.getId(), mrId});
+        } catch (GitLabApiException e) {
+            LOGGER.log(Level.WARNING, "Failed to create MR pipeline: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Sends notifications to GitLab on Checkout (for the "In Progress" Status).
      */
     private static void sendNotifications(Run<?, ?> build, TaskListener listener, Boolean useResult) {
@@ -377,12 +391,21 @@ public class GitLabPipelineStatusNotifier {
                 LOGGER.log(Level.FINE, String.format("Notifiying commit: %s", hash));
 
                 if (revision instanceof MergeRequestSCMRevision) {
-                    Long projectId = getSourceProjectId(build.getParent(), gitLabApi, source.getProjectPath());
-                    status.setRef(((MergeRequestSCMRevision) revision)
-                            .getOrigin()
-                            .getHead()
-                            .getName());
-                    gitLabApi.getCommitsApi().addCommitStatus(projectId, hash, state, status);
+                    MergeRequestSCMHead mrHead = (MergeRequestSCMHead) revision.getHead();
+                    Long mrId = Long.valueOf(mrHead.getId());
+                    
+                    // For merge requests, we need to create a pipeline first to make it show as MR pipeline
+                    // Then set the status on the target project (not source project)
+                    String mrRef = "refs/merge-requests/" + mrId + "/head";
+                    
+                    // Create MR pipeline if this is the first notification (RUNNING state)
+                    if (state == Constants.CommitBuildState.RUNNING) {
+                        createMergeRequestPipeline(gitLabApi, source.getProjectPath(), mrId, mrRef);
+                    }
+                    
+                    // Set status on the target project using the MR ref
+                    status.setRef(mrRef);
+                    gitLabApi.getCommitsApi().addCommitStatus(source.getProjectPath(), hash, state, status);
                 } else {
                     gitLabApi.getCommitsApi().addCommitStatus(source.getProjectPath(), hash, state, status);
                 }
@@ -490,12 +513,15 @@ public class GitLabPipelineStatusNotifier {
                         }
 
                         if (revision instanceof MergeRequestSCMRevision) {
-                            Long projectId = getSourceProjectId(job, gitLabApi, source.getProjectPath());
-                            status.setRef(((MergeRequestSCMRevision) revision)
-                                    .getOrigin()
-                                    .getHead()
-                                    .getName());
-                            gitLabApi.getCommitsApi().addCommitStatus(projectId, hash, state, status);
+                            MergeRequestSCMHead mrHead = (MergeRequestSCMHead) revision.getHead();
+                            Long mrId = Long.valueOf(mrHead.getId());
+                            String mrRef = "refs/merge-requests/" + mrId + "/head";
+                            
+                            // Create MR pipeline for pending state
+                            createMergeRequestPipeline(gitLabApi, source.getProjectPath(), mrId, mrRef);
+                            
+                            status.setRef(mrRef);
+                            gitLabApi.getCommitsApi().addCommitStatus(source.getProjectPath(), hash, state, status);
                         } else {
                             gitLabApi.getCommitsApi().addCommitStatus(source.getProjectPath(), hash, state, status);
                         }
